@@ -730,14 +730,13 @@ static int aw9523_create_sysfs(struct i2c_client *client) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-static void aw9523_input_register(void) {
+static int aw9523_input_register(void) {
     int err;
     struct input_dev *input_dev;
 
     input_dev = input_allocate_device();
     if (!input_dev) {
-        err = -ENOMEM;
-        goto exit_input_dev_alloc_failed;
+        return -ENOMEM;
     }
 
     aw9523_key->input_dev = input_dev;
@@ -808,10 +807,16 @@ static void aw9523_input_register(void) {
         goto exit_input_register_device_failed;
     }
 
-    exit_input_dev_alloc_failed:
-    cancel_work_sync(&aw9523_key->eint_work);
+    /* A registered input device is owned by the input core.  Do not fall
+     * through to input_free_device(), which is only valid before a successful
+     * registration or after registration failed.
+     */
+    return 0;
+
     exit_input_register_device_failed:
+    aw9523_key->input_dev = NULL;
     input_free_device(input_dev);
+    return err;
 }
 
 #ifdef CONFIG_AW9523_FB
@@ -851,13 +856,16 @@ static int aw9523_fb_notifier_callback(struct notifier_block *self,
 
 static int aw9523_hall_notifier_callback(struct notifier_block *self, unsigned long event, void *data) {
     struct aw9523_key_data *aw9523 = container_of(self, struct aw9523_key_data, hall_notif);
+    /* Hall can repeat its initial lid state. Only act on transitions so
+     * repeated notifications do not unbalance keyboard IRQ disables.
+     */
     // Must indicate device is closed before suspending, and resume before setting device opened.
     // This is to avoid reporting random keys during suspend/resume
-    if (event == HALL_FCOVER_CLOSE) {
+    if (event == HALL_FCOVER_CLOSE && !aw9523->is_device_closed) {
         AW9523_LOG("%s: hall notify device closed.\n", __func__);
         aw9523->is_device_closed = true;
         aw9523_i2c_early_suspend(aw9523_i2c_client);
-    } else if (event == HALL_FCOVER_OPEN) {
+    } else if (event == HALL_FCOVER_OPEN && aw9523->is_device_closed) {
         AW9523_LOG("%s: hall notify device opened.\n", __func__);
         aw9523_i2c_early_resume(aw9523_i2c_client);
         aw9523->is_device_closed = false;
@@ -907,7 +915,9 @@ static int aw9523_i2c_probe(struct i2c_client *client,
     aw9523_key->delay = 10;    //50
     aw9523_key->dev = &client->dev;
 
-    aw9523_input_register();
+    err = aw9523_input_register();
+    if (err)
+        goto exit_create_singlethread;
 
     aw9523_key->keymap_len = sizeof(key_map) / sizeof(KEY_STATE);
     aw9523_key->keymap = (KEY_STATE *) &key_map;

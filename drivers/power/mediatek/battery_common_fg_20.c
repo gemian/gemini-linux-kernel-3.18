@@ -1682,6 +1682,19 @@ static void mt_battery_update_EM(struct battery_data *bat_data)
 #endif
 }
 
+static bool dlpt_power_off_voltage_confirmed(int battery_mv)
+{
+	return battery_mv > 0 && battery_mv <= POWER_INT2_VOLT;
+}
+
+static bool dlpt_power_off_signal_confirmed(int battery_mv,
+					    unsigned char samples,
+					    unsigned long elapsed_jiffies)
+{
+	return dlpt_power_off_voltage_confirmed(battery_mv) &&
+	       samples >= 4 && elapsed_jiffies >= 5 * HZ;
+}
+
 
 
 static void battery_update(struct battery_data *bat_data)
@@ -1737,23 +1750,46 @@ static void battery_update(struct battery_data *bat_data)
 #ifndef DISABLE_DLPT_FEATURE
 	if (bat_data->BAT_CAPACITY <= DLPT_POWER_OFF_THD) {
 		static unsigned char cnt = 0xff;
+		static unsigned long first_low_jiffies;
+		int dlpt_power_off;
+		unsigned long elapsed_jiffies;
 
-		if (cnt == 0xff)
+		if (cnt == 0xff) {
 			cnt = 0;
+			first_low_jiffies = 0;
+		}
 
-		if (dlpt_check_power_off() == 1) {
-			bat_data->BAT_CAPACITY = 0;
-			BMT_status.UI_SOC2 = 0;
-			cnt++;
-			battery_log(BAT_LOG_CRTI,
-				    "[DLPT_POWER_OFF_EN] SOC=%d to power off , cnt=%d\n",
-				    bat_data->BAT_CAPACITY, cnt);
+		dlpt_power_off = dlpt_check_power_off();
+		if (dlpt_power_off == 1 &&
+		    dlpt_power_off_voltage_confirmed(BMT_status.bat_vol)) {
+			if (cnt == 0)
+				first_low_jiffies = jiffies;
+			if (cnt < 4)
+				cnt++;
+			elapsed_jiffies = jiffies - first_low_jiffies;
 
-			if (cnt >= 4)
+			if (dlpt_power_off_signal_confirmed(BMT_status.bat_vol,
+						    cnt, elapsed_jiffies)) {
+				bat_data->BAT_CAPACITY = 0;
+				BMT_status.UI_SOC2 = 0;
+				battery_log(BAT_LOG_CRTI,
+					    "[DLPT_POWER_OFF_EN] confirmed voltage=%d cnt=%d elapsed=%lu jiffies\n",
+					    BMT_status.bat_vol, cnt,
+					    elapsed_jiffies);
 				kernel_restart("DLPT reboot system");
-
+			} else {
+				battery_log(BAT_LOG_CRTI,
+					    "[DLPT_POWER_OFF_EN] pending voltage=%d cnt=%d elapsed=%lu jiffies\n",
+					    BMT_status.bat_vol, cnt,
+					    elapsed_jiffies);
+			}
 		} else {
 			cnt = 0;
+			first_low_jiffies = 0;
+			if (dlpt_power_off == 1)
+				battery_log(BAT_LOG_CRTI,
+					    "[DLPT_POWER_OFF_EN] ignore unconfirmed low-voltage signal at %d mV\n",
+					    BMT_status.bat_vol);
 		}
 	} else {
 		battery_log(BAT_LOG_CRTI, "[DLPT_POWER_OFF_EN] disable(%d)\n",

@@ -1032,7 +1032,8 @@ void mt_eint_set_hw_debounce(unsigned int gpio_pin, unsigned int us)
 static void eint_do_tasklet(unsigned long unused)
 {
 #ifndef CONFIG_HAS_EARLYSUSPEND
-	__pm_wakeup_event(&EINT_suspend_lock, HZ / 2);
+	/* The PM wakeup API takes milliseconds, not jiffies. */
+	__pm_wakeup_event(&EINT_suspend_lock, 500);
 #else
 	wake_lock_timeout(&EINT_suspend_lock, HZ / 2);
 #endif
